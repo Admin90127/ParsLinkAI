@@ -16,7 +16,7 @@ from rich import print as rprint
 import typer
 from rich.table import Table
 from datetime import datetime
-from data.config import Config
+from config import Config
 import ssl
 import socket
 import time

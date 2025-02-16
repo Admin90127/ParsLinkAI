@@ -8,8 +8,11 @@ from rich.panel import Panel
 console = Console()
 
 class Config:
-    def __init__(self):
-        self.config_file = Path.home() / '.parslinkai' / 'config.json'
+    def __init__(self, config_path=None):
+        if config_path:
+            self.config_file = Path(config_path)
+        else:
+            self.config_file = Path.home() / '.parslinkai' / 'config.json'
         self.default_config = {
             'api_key': '',
             'model': 'gemini-pro',
