@@ -16,26 +16,18 @@ from rich import print as rprint
 import typer
 from rich.table import Table
 from datetime import datetime
-from config import Config
 import ssl
 import socket
 import time
+from config import Config
 
 app = typer.Typer()
 console = Console()
 
-# Определяем путь к конфигу в зависимости от режима запуска
-if getattr(sys, 'frozen', False):
-    # Если приложение запущено как собранный exe
-    config_dir = os.path.join(sys._MEIPASS, 'data')
-else:
-    # В режиме разработки
-    config_dir = os.path.dirname(os.path.abspath(__file__))
+VERSION = "1.2"
 
-config_path = os.path.join(config_dir, 'config.json')
-config_manager = Config(config_path)
-
-VERSION = "1.1"
+# Инициализация конфигурации
+config_manager = Config()
 
 class ParsLinkAI:
     def __init__(self):
@@ -48,6 +40,83 @@ class ParsLinkAI:
         
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel(config_manager.get_model())
+
+    def analyze_performance(self, soup, response):
+        """
+        Анализ производительности сайта
+        """
+        performance = {
+            'page_size': len(response.content) / 1024,  # размер в КБ
+            'scripts_count': len(soup.find_all('script')),
+            'styles_count': len(soup.find_all('link', rel='stylesheet')),
+            'images': []
+        }
+        
+        # Анализ изображений
+        for img in soup.find_all('img'):
+            img_data = {
+                'src': img.get('src', ''),
+                'alt': img.get('alt', ''),
+                'has_alt': bool(img.get('alt')),
+            }
+            performance['images'].append(img_data)
+            
+        return performance
+        
+    def analyze_seo(self, soup, url):
+        """
+        Расширенный SEO-анализ
+        """
+        seo_data = {
+            'headings': {},
+            'links': {'internal': [], 'external': []},
+            'meta_tags': {},
+            'sitemap': None,
+            'robots': None
+        }
+        
+        # Анализ заголовков
+        for i in range(1, 7):
+            seo_data['headings'][f'h{i}'] = len(soup.find_all(f'h{i}'))
+            
+        # Анализ ссылок
+        domain = url.split('//')[1].split('/')[0]
+        for link in soup.find_all('a'):
+            href = link.get('href')
+            if href:
+                if domain in href or href.startswith('/'):
+                    seo_data['links']['internal'].append(href)
+                else:
+                    seo_data['links']['external'].append(href)
+                    
+        # Проверка sitemap и robots
+        try:
+            robots_resp = requests.get(f"{url.rstrip('/')}/robots.txt", timeout=5)
+            if robots_resp.status_code == 200:
+                seo_data['robots'] = robots_resp.text
+                
+            sitemap_resp = requests.get(f"{url.rstrip('/')}/sitemap.xml", timeout=5)
+            if sitemap_resp.status_code == 200:
+                seo_data['sitemap'] = True
+        except:
+            pass
+            
+        return seo_data
+        
+    def analyze_security(self, response):
+        """
+        Расширенный анализ безопасности
+        """
+        security = {
+            'headers': {
+                'HSTS': response.headers.get('Strict-Transport-Security'),
+                'CSP': response.headers.get('Content-Security-Policy'),
+                'X-Frame-Options': response.headers.get('X-Frame-Options'),
+                'X-XSS-Protection': response.headers.get('X-XSS-Protection')
+            },
+            'cookies': {str(cookie): response.cookies[cookie] for cookie in response.cookies},
+        }
+        return security
 
     def parse_website(self, url: str) -> Optional[Dict]:
         """
@@ -67,6 +136,8 @@ class ParsLinkAI:
                         ssl_info['valid'] = True
                         ssl_info['issuer'] = dict(x[0] for x in cert['issuer'])
                         ssl_info['expires'] = cert['notAfter']
+                        ssl_info['version'] = ssock.version()
+                        ssl_info['cipher'] = ssock.cipher()
             except Exception as e:
                 ssl_info['error'] = str(e)
             
@@ -84,7 +155,6 @@ class ParsLinkAI:
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
-                # Добавляем схему, если ее нет
                 if not url.startswith('http://') and not url.startswith('https://'):
                     url = 'https://' + url
                 response = requests.get(url, headers=headers, timeout=30)
@@ -96,16 +166,28 @@ class ParsLinkAI:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 progress.update(parse_task, advance=50)
                 
-                # Собираем основную информацию
+                # Анализ производительности
+                perf_task = progress.add_task("[yellow]Анализ производительности...", total=100)
+                performance_data = self.analyze_performance(soup, response)
+                progress.update(perf_task, advance=100)
+                
+                # SEO анализ
+                seo_task = progress.add_task("[blue]SEO анализ...", total=100)
+                seo_data = self.analyze_seo(soup, url)
+                progress.update(seo_task, advance=100)
+                
+                # Анализ безопасности
+                security_task = progress.add_task("[red]Анализ безопасности...", total=100)
+                security_data = self.analyze_security(response)
+                progress.update(security_task, advance=100)
+                
+                # Основная информация
                 title = soup.title.string if soup.title else "Заголовок не найден"
                 meta_description = soup.find('meta', {'name': 'description'})
                 description = meta_description['content'] if meta_description else "Описание не найдено"
-                progress.update(parse_task, advance=50)
                 
                 # Получаем текст из основного контента
-                content_task = progress.add_task("[yellow]Извлечение контента...", total=100)
                 main_content = ' '.join([p.text for p in soup.find_all(['p', 'h1', 'h2', 'h3', 'article'])])
-                progress.update(content_task, advance=100)
                 
                 # Формируем промпт для Gemini
                 analysis_task = progress.add_task("[magenta]Анализ через Gemini AI...", total=100)
@@ -116,39 +198,40 @@ class ParsLinkAI:
                 Описание: {description}
                 Основной контент: {main_content[:1000]}...
                 
+                Производительность:
+                - Размер страницы: {performance_data['page_size']:.2f} КБ
+                - Количество скриптов: {performance_data['scripts_count']}
+                - Количество стилей: {performance_data['styles_count']}
+                
+                SEO данные:
+                - Структура заголовков: {seo_data['headings']}
+                - Внутренние ссылки: {len(seo_data['links']['internal'])}
+                - Внешние ссылки: {len(seo_data['links']['external'])}
+                
                 Пожалуйста, предоставь структурированный анализ, включающий:
                 1. Основную тему и назначение сайта
                 2. Ключевые темы и разделы
                 3. Целевую аудиторию
                 4. Качество и актуальность контента
-                5. Рекомендации по улучшению
+                5. Рекомендации по улучшению производительности и SEO
+                6. Оценку безопасности
                 """
                 
                 # Получаем анализ от Gemini
-                response = self.model.generate_content(prompt)
+                response_ai = self.model.generate_content(prompt)
                 progress.update(analysis_task, advance=100)
                 
-                # Новая функциональность: Анализ мета-тегов
-                meta_tags = {
-                    'viewport': soup.find('meta', {'name': 'viewport'}),
-                    'og:title': soup.find('meta', property='og:title'),
-                    'og:description': soup.find('meta', property='og:description')
-                }
-                
-                # Новая функциональность: Извлечение ключевых слов
-                keywords_tag = soup.find('meta', {'name': 'keywords'})
-                keywords = keywords_tag['content'].split(',') if keywords_tag else []
-
                 # Формируем результат
                 result = {
                     "url": url,
                     "title": title,
                     "description": description,
-                    "analysis": response.text,
+                    "analysis": response_ai.text,
                     "timestamp": datetime.now().isoformat(),
                     "model": config_manager.get_model(),
-                    "meta_tags": {k: v['content'] if v else None for k, v in meta_tags.items()},
-                    "keywords": keywords,
+                    "performance": performance_data,
+                    "seo": seo_data,
+                    "security": security_data,
                     "ssl_info": ssl_info,
                     "load_time": load_time
                 }
@@ -174,24 +257,45 @@ def display_results(result: Dict):
     table.add_row("Описание", result['description'])
     table.add_row("Модель", result['model'])
     table.add_row("Время загрузки", f"{result['load_time']:.2f} сек")
+    table.add_row("Размер страницы", f"{result['performance']['page_size']:.2f} КБ")
+    table.add_row("Скрипты/Стили", f"{result['performance']['scripts_count']}/{result['performance']['styles_count']}")
     table.add_row("SSL", "✅ Valid" if result['ssl_info']['valid'] else "❌ Invalid")
 
     # Отображаем результаты
     console.print("\n")
     console.print(Panel.fit(
-        "[bold cyan]ParsLinkAI[/bold cyan] - [green]Результаты анализа[/green]",
+        "[bold cyan]ParsLinkAI v1.2[/bold cyan] - [green]Результаты анализа[/green]",
         border_style="green"
     ))
     console.print(table)
     
+    # SEO информация
+    seo_table = Table(show_header=True, header_style="bold blue", title="SEO Анализ")
+    seo_table.add_column("Параметр", style="cyan")
+    seo_table.add_column("Значение", style="green")
+    
+    seo_table.add_row("Внутренние ссылки", str(len(result['seo']['links']['internal'])))
+    seo_table.add_row("Внешние ссылки", str(len(result['seo']['links']['external'])))
+    seo_table.add_row("Sitemap.xml", "✅ Найден" if result['seo']['sitemap'] else "❌ Не найден")
+    seo_table.add_row("Robots.txt", "✅ Найден" if result['seo']['robots'] else "❌ Не найден")
+    
+    console.print("\n")
+    console.print(seo_table)
+    
+    # Безопасность
+    security_table = Table(show_header=True, header_style="bold red", title="Анализ безопасности")
+    security_table.add_column("Заголовок", style="cyan")
+    security_table.add_column("Статус", style="green")
+    
+    for header, value in result['security']['headers'].items():
+        security_table.add_row(header, "✅ Установлен" if value else "❌ Отсутствует")
+    
+    console.print("\n")
+    console.print(security_table)
+    
     # Отображаем анализ от Gemini
     console.print("\n[bold cyan]Анализ от Gemini AI:[/bold cyan]")
     console.print(Panel(result['analysis'], border_style="cyan"))
-
-    # Новая панель для ключевых слов
-    console.print("\n[bold cyan]Ключевые слова:[/bold cyan]")
-    console.print(Panel(', '.join(result['keywords']) if result['keywords'] else "Не найдено", 
-                       title="SEO Keywords"))
 
 def save_html_report(result: Dict, filename: str):
     ssl_status = '✅ Valid' if result['ssl_info']['valid'] else f'❌ Invalid ({result["ssl_info"].get("error", "Unknown error")})'
